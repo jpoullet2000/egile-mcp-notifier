@@ -18,10 +18,16 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+import msal
+import requests
+
 logger = logging.getLogger(__name__)
 
 # Google Calendar API scopes
 SCOPES = ['https://www.googleapis.com/auth/calendar']
+
+# Microsoft Graph API scopes
+MS_SCOPES = ['Tasks.ReadWrite', 'offline_access']
 
 
 class NotificationService:
@@ -41,7 +47,13 @@ class NotificationService:
         self.token_file = os.getenv("GOOGLE_CALENDAR_TOKEN_FILE", "token.json")
         self.default_calendar_id = os.getenv("DEFAULT_CALENDAR_ID", "primary")
         
+        # Microsoft To-Do configuration
+        self.ms_client_id = os.getenv("MS_TODO_CLIENT_ID")
+        self.ms_tenant_id = os.getenv("MS_TODO_TENANT_ID", "common")
+        self.ms_token_cache_file = os.getenv("MS_TODO_TOKEN_FILE", "ms_token_cache.json")
+        
         self._calendar_service = None
+        self._ms_token_cache = None
 
     def _get_calendar_service(self):
         """Get or create Google Calendar service."""
@@ -458,4 +470,397 @@ class NotificationService:
                 "success": False,
                 "error": str(e),
                 "event_id": event_id
+            }
+
+    # Microsoft To-Do methods
+    
+    def _get_ms_token_cache(self):
+        """Get or create Microsoft token cache."""
+        if self._ms_token_cache is not None:
+            return self._ms_token_cache
+            
+        self._ms_token_cache = msal.SerializableTokenCache()
+        
+        # Load existing cache if it exists
+        if Path(self.ms_token_cache_file).exists():
+            try:
+                with open(self.ms_token_cache_file, 'r') as f:
+                    self._ms_token_cache.deserialize(f.read())
+            except Exception as e:
+                logger.warning(f"Failed to load MS token cache: {e}")
+        
+        return self._ms_token_cache
+    
+    def _save_ms_token_cache(self):
+        """Save Microsoft token cache to file."""
+        if self._ms_token_cache and self._ms_token_cache.has_state_changed:
+            try:
+                with open(self.ms_token_cache_file, 'w') as f:
+                    f.write(self._ms_token_cache.serialize())
+            except Exception as e:
+                logger.error(f"Failed to save MS token cache: {e}")
+    
+    def _get_ms_access_token(self) -> str:
+        """Get Microsoft Graph API access token."""
+        if not self.ms_client_id:
+            raise ValueError(
+                "Microsoft To-Do not configured. "
+                "Please set MS_TODO_CLIENT_ID in .env file"
+            )
+        
+        cache = self._get_ms_token_cache()
+        
+        app = msal.PublicClientApplication(
+            self.ms_client_id,
+            authority=f"https://login.microsoftonline.com/{self.ms_tenant_id}",
+            token_cache=cache
+        )
+        
+        # Try to get token from cache
+        accounts = app.get_accounts()
+        if accounts:
+            result = app.acquire_token_silent(MS_SCOPES, account=accounts[0])
+            if result and "access_token" in result:
+                return result["access_token"]
+        
+        # If no cached token, do interactive login
+        flow = app.initiate_device_flow(scopes=MS_SCOPES)
+        
+        if "user_code" not in flow:
+            raise ValueError(f"Failed to create device flow: {flow.get('error_description')}")
+        
+        print(flow["message"])
+        
+        result = app.acquire_token_by_device_flow(flow)
+        
+        if "access_token" not in result:
+            raise ValueError(f"Failed to acquire token: {result.get('error_description')}")
+        
+        self._save_ms_token_cache()
+        return result["access_token"]
+    
+    def _ms_graph_request(self, method: str, endpoint: str, data: Optional[dict] = None) -> dict:
+        """Make a request to Microsoft Graph API."""
+        token = self._get_ms_access_token()
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json'
+        }
+        
+        url = f"https://graph.microsoft.com/v1.0{endpoint}"
+        
+        if method.upper() == "GET":
+            response = requests.get(url, headers=headers)
+        elif method.upper() == "POST":
+            response = requests.post(url, headers=headers, json=data)
+        elif method.upper() == "PATCH":
+            response = requests.patch(url, headers=headers, json=data)
+        elif method.upper() == "DELETE":
+            response = requests.delete(url, headers=headers)
+        else:
+            raise ValueError(f"Unsupported HTTP method: {method}")
+        
+        response.raise_for_status()
+        
+        # DELETE requests may not return content
+        if response.status_code == 204:
+            return {}
+        
+        return response.json()
+    
+    def create_todo(
+        self,
+        title: str,
+        body: Optional[str] = None,
+        due_date: Optional[str] = None,
+        importance: str = "normal",
+        list_id: Optional[str] = None,
+        reminder_date: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Create a Microsoft To-Do task.
+        
+        Args:
+            title: Task title
+            body: Task body/notes (optional)
+            due_date: Due date in ISO format (e.g., "2026-01-25") (optional)
+            importance: Task importance - "low", "normal", or "high" (default: "normal")
+            list_id: To-Do list ID (optional, uses default list if not specified)
+            reminder_date: Reminder date/time in ISO format (optional)
+        
+        Returns:
+            Dictionary with task details
+        """
+        try:
+            # Get list ID if not provided
+            if not list_id:
+                lists = self._ms_graph_request("GET", "/me/todo/lists")
+                if not lists.get("value"):
+                    raise ValueError("No To-Do lists found")
+                list_id = lists["value"][0]["id"]
+            
+            task_data = {
+                "title": title,
+                "importance": importance,
+            }
+            
+            if body:
+                task_data["body"] = {
+                    "content": body,
+                    "contentType": "text"
+                }
+            
+            if due_date:
+                task_data["dueDateTime"] = {
+                    "dateTime": due_date,
+                    "timeZone": "UTC"
+                }
+            
+            if reminder_date:
+                task_data["reminderDateTime"] = {
+                    "dateTime": reminder_date,
+                    "timeZone": "UTC"
+                }
+                task_data["isReminderOn"] = True
+            
+            result = self._ms_graph_request(
+                "POST",
+                f"/me/todo/lists/{list_id}/tasks",
+                task_data
+            )
+            
+            return {
+                "success": True,
+                "task_id": result["id"],
+                "title": result["title"],
+                "status": result.get("status"),
+                "importance": result.get("importance"),
+                "created_at": result.get("createdDateTime"),
+                "web_link": result.get("webUrl"),
+                "message": "To-Do task created successfully"
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to create To-Do task: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "title": title
+            }
+    
+    def list_todos(
+        self,
+        list_id: Optional[str] = None,
+        filter_status: Optional[str] = None,
+        max_results: int = 50,
+    ) -> dict[str, Any]:
+        """
+        List Microsoft To-Do tasks.
+        
+        Args:
+            list_id: To-Do list ID (optional, uses default list if not specified)
+            filter_status: Filter by status - "notStarted", "inProgress", "completed" (optional)
+            max_results: Maximum number of tasks to return (default: 50)
+        
+        Returns:
+            Dictionary with list of tasks
+        """
+        try:
+            # Get list ID if not provided
+            if not list_id:
+                lists = self._ms_graph_request("GET", "/me/todo/lists")
+                if not lists.get("value"):
+                    return {
+                        "success": True,
+                        "count": 0,
+                        "tasks": [],
+                        "message": "No To-Do lists found"
+                    }
+                list_id = lists["value"][0]["id"]
+            
+            endpoint = f"/me/todo/lists/{list_id}/tasks?$top={max_results}"
+            
+            if filter_status:
+                endpoint += f"&$filter=status eq '{filter_status}'"
+            
+            result = self._ms_graph_request("GET", endpoint)
+            
+            tasks = []
+            for task in result.get("value", []):
+                tasks.append({
+                    "id": task["id"],
+                    "title": task["title"],
+                    "status": task.get("status"),
+                    "importance": task.get("importance"),
+                    "body": task.get("body", {}).get("content", ""),
+                    "due_date": task.get("dueDateTime", {}).get("dateTime"),
+                    "created_at": task.get("createdDateTime"),
+                    "completed_at": task.get("completedDateTime", {}).get("dateTime"),
+                    "web_link": task.get("webUrl")
+                })
+            
+            return {
+                "success": True,
+                "count": len(tasks),
+                "tasks": tasks
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to list To-Do tasks: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def update_todo(
+        self,
+        task_id: str,
+        list_id: Optional[str] = None,
+        title: Optional[str] = None,
+        body: Optional[str] = None,
+        status: Optional[str] = None,
+        importance: Optional[str] = None,
+        due_date: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Update a Microsoft To-Do task.
+        
+        Args:
+            task_id: Task ID to update
+            list_id: To-Do list ID (optional, uses default list if not specified)
+            title: New task title (optional)
+            body: New task body (optional)
+            status: New status - "notStarted", "inProgress", "completed" (optional)
+            importance: New importance - "low", "normal", "high" (optional)
+            due_date: New due date in ISO format (optional)
+        
+        Returns:
+            Dictionary with updated task details
+        """
+        try:
+            # Get list ID if not provided
+            if not list_id:
+                lists = self._ms_graph_request("GET", "/me/todo/lists")
+                if not lists.get("value"):
+                    raise ValueError("No To-Do lists found")
+                list_id = lists["value"][0]["id"]
+            
+            update_data = {}
+            
+            if title:
+                update_data["title"] = title
+            
+            if body is not None:
+                update_data["body"] = {
+                    "content": body,
+                    "contentType": "text"
+                }
+            
+            if status:
+                update_data["status"] = status
+            
+            if importance:
+                update_data["importance"] = importance
+            
+            if due_date:
+                update_data["dueDateTime"] = {
+                    "dateTime": due_date,
+                    "timeZone": "UTC"
+                }
+            
+            result = self._ms_graph_request(
+                "PATCH",
+                f"/me/todo/lists/{list_id}/tasks/{task_id}",
+                update_data
+            )
+            
+            return {
+                "success": True,
+                "task_id": result["id"],
+                "title": result["title"],
+                "status": result.get("status"),
+                "importance": result.get("importance"),
+                "message": "To-Do task updated successfully"
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to update To-Do task: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "task_id": task_id
+            }
+    
+    def delete_todo(
+        self,
+        task_id: str,
+        list_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Delete a Microsoft To-Do task.
+        
+        Args:
+            task_id: Task ID to delete
+            list_id: To-Do list ID (optional, uses default list if not specified)
+        
+        Returns:
+            Dictionary with deletion status
+        """
+        try:
+            # Get list ID if not provided
+            if not list_id:
+                lists = self._ms_graph_request("GET", "/me/todo/lists")
+                if not lists.get("value"):
+                    raise ValueError("No To-Do lists found")
+                list_id = lists["value"][0]["id"]
+            
+            self._ms_graph_request(
+                "DELETE",
+                f"/me/todo/lists/{list_id}/tasks/{task_id}"
+            )
+            
+            return {
+                "success": True,
+                "task_id": task_id,
+                "message": "To-Do task deleted successfully"
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to delete To-Do task: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "task_id": task_id
+            }
+    
+    def list_todo_lists(self) -> dict[str, Any]:
+        """
+        List all Microsoft To-Do lists.
+        
+        Returns:
+            Dictionary with list of To-Do lists
+        """
+        try:
+            result = self._ms_graph_request("GET", "/me/todo/lists")
+            
+            lists = []
+            for todo_list in result.get("value", []):
+                lists.append({
+                    "id": todo_list["id"],
+                    "name": todo_list["displayName"],
+                    "is_owner": todo_list.get("isOwner", False),
+                    "is_shared": todo_list.get("isShared", False),
+                })
+            
+            return {
+                "success": True,
+                "count": len(lists),
+                "lists": lists
+            }
+        
+        except Exception as e:
+            logger.error(f"Failed to list To-Do lists: {e}")
+            return {
+                "success": False,
+                "error": str(e)
             }

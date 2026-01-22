@@ -200,6 +200,129 @@ class NotificationMCPServer:
                         "required": ["event_id"],
                     },
                 ),
+                Tool(
+                    name="create_todo",
+                    description="Create a Microsoft To-Do task",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "description": "Task title",
+                            },
+                            "body": {
+                                "type": "string",
+                                "description": "Task body/notes (optional)",
+                            },
+                            "due_date": {
+                                "type": "string",
+                                "description": "Due date in ISO format, e.g., 2026-01-25 (optional)",
+                            },
+                            "importance": {
+                                "type": "string",
+                                "enum": ["low", "normal", "high"],
+                                "description": "Task importance (default: normal)",
+                            },
+                            "list_id": {
+                                "type": "string",
+                                "description": "To-Do list ID (optional, uses default list)",
+                            },
+                            "reminder_date": {
+                                "type": "string",
+                                "description": "Reminder date/time in ISO format (optional)",
+                            },
+                        },
+                        "required": ["title"],
+                    },
+                ),
+                Tool(
+                    name="list_todos",
+                    description="List Microsoft To-Do tasks",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "list_id": {
+                                "type": "string",
+                                "description": "To-Do list ID (optional, uses default list)",
+                            },
+                            "filter_status": {
+                                "type": "string",
+                                "enum": ["notStarted", "inProgress", "completed"],
+                                "description": "Filter by status (optional)",
+                            },
+                            "max_results": {
+                                "type": "number",
+                                "description": "Maximum number of tasks to return (default: 50)",
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="update_todo",
+                    description="Update a Microsoft To-Do task",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "Task ID to update",
+                            },
+                            "list_id": {
+                                "type": "string",
+                                "description": "To-Do list ID (optional, uses default list)",
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "New task title (optional)",
+                            },
+                            "body": {
+                                "type": "string",
+                                "description": "New task body (optional)",
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["notStarted", "inProgress", "completed"],
+                                "description": "New status (optional)",
+                            },
+                            "importance": {
+                                "type": "string",
+                                "enum": ["low", "normal", "high"],
+                                "description": "New importance (optional)",
+                            },
+                            "due_date": {
+                                "type": "string",
+                                "description": "New due date in ISO format (optional)",
+                            },
+                        },
+                        "required": ["task_id"],
+                    },
+                ),
+                Tool(
+                    name="delete_todo",
+                    description="Delete a Microsoft To-Do task",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "Task ID to delete",
+                            },
+                            "list_id": {
+                                "type": "string",
+                                "description": "To-Do list ID (optional, uses default list)",
+                            },
+                        },
+                        "required": ["task_id"],
+                    },
+                ),
+                Tool(
+                    name="list_todo_lists",
+                    description="List all Microsoft To-Do lists",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                ),
             ]
 
         @self.server.call_tool()
@@ -254,6 +377,43 @@ class NotificationMCPServer:
                         event_id=arguments["event_id"],
                         calendar_id=arguments.get("calendar_id"),
                     )
+                    
+                elif name == "create_todo":
+                    result = self.service.create_todo(
+                        title=arguments["title"],
+                        body=arguments.get("body"),
+                        due_date=arguments.get("due_date"),
+                        importance=arguments.get("importance", "normal"),
+                        list_id=arguments.get("list_id"),
+                        reminder_date=arguments.get("reminder_date"),
+                    )
+                    
+                elif name == "list_todos":
+                    result = self.service.list_todos(
+                        list_id=arguments.get("list_id"),
+                        filter_status=arguments.get("filter_status"),
+                        max_results=arguments.get("max_results", 50),
+                    )
+                    
+                elif name == "update_todo":
+                    result = self.service.update_todo(
+                        task_id=arguments["task_id"],
+                        list_id=arguments.get("list_id"),
+                        title=arguments.get("title"),
+                        body=arguments.get("body"),
+                        status=arguments.get("status"),
+                        importance=arguments.get("importance"),
+                        due_date=arguments.get("due_date"),
+                    )
+                    
+                elif name == "delete_todo":
+                    result = self.service.delete_todo(
+                        task_id=arguments["task_id"],
+                        list_id=arguments.get("list_id"),
+                    )
+                    
+                elif name == "list_todo_lists":
+                    result = self.service.list_todo_lists()
                     
                 else:
                     result = {"error": f"Unknown tool: {name}"}

@@ -42,3 +42,11 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Google Calendar credentials
+credentials.json
+token.json
+token.pickle
+
+# Microsoft To-Do credentials
+ms_token_cache.json

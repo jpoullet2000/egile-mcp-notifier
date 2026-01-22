@@ -1,14 +1,14 @@
 [project]
 name = "egile-mcp-notifier"
 version = "0.1.0"
-description = "MCP server for sending email notifications and managing Google Calendar events"
+description = "MCP server for sending email notifications, managing Google Calendar events, and managing Microsoft To-Do tasks"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
     { name = "Egile Team" }
 ]
-keywords = ["mcp", "notification", "email", "calendar", "google", "ai"]
+keywords = ["mcp", "notification", "email", "calendar", "google", "microsoft", "todo", "tasks", "ai"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -29,6 +29,7 @@ dependencies = [
     "google-auth-oauthlib>=1.2.0",
     "google-auth-httplib2>=0.2.0",
     "google-api-python-client>=2.110.0",
+    "msal>=1.26.0",
 ]
 
 [project.scripts]
